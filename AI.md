@@ -1,14 +1,9 @@
 # AI use
 
-* **Tools:** Claude Code. I used it to read the brief closely, draft the design
-  (`docs/DESIGN.md`), write most of the code and tests from that design, and run the review
-  loop. I reviewed every file against the brief, ran the tests and the simulator myself, and
-  checked the console in a real browser.
-* **What it got wrong that I caught:** it saved a sensor replay with the `now` it was given. A
-  background item runs at its due time, which can be a moment *before* a request already replayed
-  the same sensor. Replaying to that earlier time gives a shorter history, and the diff then
-  records a false `correction`. I added `computed_at`, so a replay never goes back in time
-  (`domain/sensorStore.ts`).
-* **Also caught:** the 24-hour "latest collection" window excluded an outcome at exactly 24h.
-  A gateway that reports at the same minute every day then flickered to `not_checked` for an
-  instant, and wrote two timeline entries a day. The window now includes exactly 24h.
+I used Claude Code on this task. It helped at five stages, and I made the decisions and reviewed the result at each one.
+
+1. **Understanding the brief.** I used it to read the task instructions closely and make sure I understood what was being asked.
+2. **Planning.** I discussed the design and the implementation plan with it, and we went back and forth until I was happy with both. The design is written up in `docs/DESIGN.md`.
+3. **Implementation.** Once the plan was settled, I had it write the code and tests from that plan.
+4. **Review.** I reviewed every part of the code it wrote myself.
+5. **Final AI review.** At the very end, I also had it review the entire system.
