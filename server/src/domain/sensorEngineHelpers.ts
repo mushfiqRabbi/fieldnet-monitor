@@ -204,6 +204,9 @@ function buildCollectionEvidence(ctx: Ctx): CollectionEvidence[] {
 
 const precedence = (v: Outcome) => COLLECTION_PRECEDENCE.indexOf(v);
 
+/** The first instant at which an outcome no longer counts. */
+const expiryOf = (at: number) => at + COLLECTION_WINDOW_MS + 1;
+
 /** The outcome each available, assigned gateway currently contributes (24h freshness applied). */
 function freshOutcomesAt(ctx: Ctx, t: number): CollectionEvidence[] {
   const fresh: CollectionEvidence[] = [];
@@ -216,7 +219,9 @@ function freshOutcomesAt(ctx: Ctx, t: number): CollectionEvidence[] {
         latest = e;
       }
     }
-    if (latest && t - latest.at < COLLECTION_WINDOW_MS) fresh.push(latest);
+    // "Within the last 24 hours" includes exactly 24h, so a gateway that reports at the
+    // same time every day never flickers to not_checked between two reports.
+    if (latest && t - latest.at <= COLLECTION_WINDOW_MS) fresh.push(latest);
   }
   return fresh;
 }
@@ -237,7 +242,7 @@ export function collectionSince(ctx: Ctx, registeredAt: number): number {
   for (const g of relevantGateways(ctx)) for (const row of ctx.logs[g] ?? []) points.add(row.effectiveAt);
   for (const e of ctx.collectionEvidence) {
     points.add(e.at);
-    points.add(e.at + COLLECTION_WINDOW_MS);
+    points.add(expiryOf(e.at));
   }
   const candidates = [...points].filter((p) => p <= ctx.now).sort((a, b) => b - a);
   for (const p of candidates) {
@@ -259,7 +264,7 @@ export function timeDrivenChecksAfterNow(ctx: Ctx): number[] {
   const { now } = ctx;
   const times: number[] = [];
   for (const o of ctx.outcomes) if (o.deadlineAt !== null && o.deadlineAt > now) times.push(o.deadlineAt);
-  for (const e of freshOutcomesAt(ctx, now)) times.push(e.at + COLLECTION_WINDOW_MS);
+  for (const e of freshOutcomesAt(ctx, now)) times.push(expiryOf(e.at));
   for (const e of ctx.collectionEvidence) if (e.at > now) times.push(e.at);
   for (const r of ctx.readings) if (r.takenAt > now) times.push(r.takenAt);
   return times.filter((t) => t > now);

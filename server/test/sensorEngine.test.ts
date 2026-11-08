@@ -654,15 +654,16 @@ describe('latest collection', () => {
   it('ignores outcomes older than 24 hours', () => {
     const s = twoGateways().cycle('G1', D(1, 10), 'no_readings');
     expect(s.at(D(2, 9, 59)).collection).toBe('no_readings');
-    const expired = s.at(D(2, 10));
+    expect(s.at(D(2, 10)).collection).toBe('no_readings'); // exactly 24h still counts
+    const expired = s.at(D(2, 10) + 1);
     expect(expired.collection).toBe('not_checked');
-    expect(expired.collectionSince).toBe(D(2, 10));
+    expect(expired.collectionSince).toBe(D(2, 10) + 1);
   });
 
   it('an old outcome does not hide: the newer one of the same gateway decides, and it can expire alone', () => {
     const s = twoGateways().cycle('G1', D(1, 10), 'no_readings').cycle('G1', D(1, 20), 'could_not_read');
     expect(s.at(D(2, 12)).collection).toBe('could_not_read');
-    expect(s.at(D(2, 20)).collection).toBe('not_checked');
+    expect(s.at(D(2, 20) + 1).collection).toBe('not_checked');
   });
 
   it('only counts gateways whose class is available', () => {
@@ -695,7 +696,7 @@ describe('latest collection', () => {
     const r = s.at(D(3, 6));
     expect(r.collection).toBe('readings');
     expect(r.collectionSince).toBe(D(3, 5));
-    expect(s.at(D(4, 5)).collection).toBe('not_checked');
+    expect(s.at(D(4, 5) + 1).collection).toBe('not_checked');
   });
 
   it('a readings outcome whose batch is quarantined counts as could_not_read', () => {
@@ -708,7 +709,7 @@ describe('latest collection', () => {
     const s = new Scenario().assign(D(0), 'G').gateway('G', [D(0), 'available'])
       .readingsCycle('G', D(1, 10), 'gone', 'missing');
     expect(s.at(D(2, 9)).collection).toBe('readings');
-    expect(s.at(D(2, 10)).collection).toBe('not_checked'); // resolved as could_not_read AND older than 24h
+    expect(s.at(D(2, 10) + 1).collection).toBe('not_checked'); // resolved as could_not_read AND older than 24h
     const received = new Scenario().assign(D(0), 'G').gateway('G', [D(0), 'available'])
       .readingsCycle('G', D(1, 10), 'slow', 'received');
     expect(received.at(D(1, 12)).collection).toBe('readings');
@@ -846,7 +847,7 @@ describe('nextCheckAt', () => {
   it('is the 24h expiry of a counting outcome when that comes first', () => {
     const s = new Scenario().assign(D(0), 'G').gateway('G', [D(0), 'available']).cycle('G', D(2, 6), 'no_readings');
     expect(s.at(D(2, 7)).nextCheckAt).toBe(D(3)); // midnight comes before the expiry at day 3 06:00
-    expect(s.at(D(3, 1)).nextCheckAt).toBe(D(3, 6)); // now the expiry is first
+    expect(s.at(D(3, 1)).nextCheckAt).toBe(D(3, 6) + 1); // now the expiry (just after 24h) is first
   });
 
   it('is the timer end when that comes before midnight', () => {
@@ -863,7 +864,7 @@ describe('nextCheckAt', () => {
       .readingsCycle('G', D(2, 23), 'lost', 'missing');
     expect(s.at(D(3, 6)).nextCheckAt).toBe(D(3, 23));
     const after = s.at(D(3, 23));
-    expect(after.nextCheckAt).toBe(D(4)); // the deadline has now passed
+    expect(after.nextCheckAt).toBe(D(3, 23) + 1); // the deadline has passed; next, that outcome expires
   });
 
   it('includes evidence dated slightly in the future', () => {
