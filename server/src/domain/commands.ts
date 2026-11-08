@@ -100,45 +100,51 @@ export async function acknowledgeCommand(ctx: Ctx, g: Gateway, commandId: string
       from: g.commandState, to: g.commandState, effectiveAt: ackedAt, rule: 'ack_superseded',
       evidenceIds: [command.id], detail: { seq: command.seq, type: command.type },
     });
-    return;
+  } else {
+    await ctx.tx.query('UPDATE commands SET ack_applied = true WHERE id = $1', [command.id]);
+    await changeGatewayState(ctx, g, { commandState: DONE_STATE[command.type] }, Math.max(ackedAt, command.issuedAt), {
+      kind: 'ack', rule: `ack_${command.type}`, evidenceIds: [command.id],
+    });
   }
-  await ctx.tx.query('UPDATE commands SET ack_applied = true WHERE id = $1', [command.id]);
-  await changeGatewayState(ctx, g, { commandState: DONE_STATE[command.type] }, Math.max(ackedAt, command.issuedAt), {
-    kind: 'ack', rule: `ack_${command.type}`, evidenceIds: [command.id],
-  });
-  if (command.type === 'stop') await flagReadingsAfterStopAck(ctx, g, ackedAt);
-  else await clearFlag(ctx, g);
+  // A stop period is about what the gateway did, so a superseded ack still opens or closes
+  // one; it only never changes the command state.
+  if (command.type === 'stop') await flagReadingsAfterStopAck(ctx, g, command.seq);
+  else await clearFlagIfPeriodEnded(ctx, g);
 }
 
 // ---------------------------------------------------------------------------
 // collecting_after_stop
 // ---------------------------------------------------------------------------
 
-/** From the acked_at of an applied stop to the acked_at of the applied resume (null: still open). */
+/**
+ * Brief: from the acked_at of a stop to the acked_at of the resume that superseded it (the
+ * first acknowledged resume with a higher seq); null while there is none yet. Built from the
+ * recorded acked_at values, whether or not the ack changed the command state.
+ */
 interface StopPeriod {
+  stopSeq: number;
   start: number;
   end: number | null;
 }
 
 async function stopPeriods(db: Db, gatewayId: string): Promise<StopPeriod[]> {
   const { rows } = await db.query(
-    'SELECT type, acked_at FROM commands WHERE gateway_id = $1 AND ack_applied ORDER BY seq',
+    'SELECT seq, type, acked_at FROM commands WHERE gateway_id = $1 AND acked_at IS NOT NULL ORDER BY seq',
     [gatewayId],
   );
-  const periods: StopPeriod[] = [];
-  let open: StopPeriod | null = null;
-  for (const r of rows) {
-    const at = r.acked_at.getTime();
-    if (r.type === 'stop' && !open) {
-      open = { start: at, end: null };
-      periods.push(open);
-    } else if (r.type === 'resume' && open) {
-      open.end = at;
-      open = null;
-    }
-  }
-  return periods;
+  const acked = rows.map((r) => ({ seq: r.seq as number, type: r.type as CommandType, at: r.acked_at.getTime() as number }));
+  return acked.flatMap((c, i) => {
+    if (c.type !== 'stop') return [];
+    const resume = acked.slice(i + 1).find((r) => r.type === 'resume');
+    return [{ stopSeq: c.seq, start: c.at, end: resume ? resume.at : null }];
+  });
 }
+
+const inside = (r: { takenAt: number }, p: StopPeriod) => r.takenAt >= p.start && (p.end === null || r.takenAt <= p.end);
+
+/** The open-ended period, if any (the earliest, when several stops are acknowledged). */
+const currentPeriod = (periods: StopPeriod[]) =>
+  periods.filter((p) => p.end === null).sort((a, b) => a.start - b.start)[0];
 
 /**
  * Readings taken inside a stop period are kept (the caller already stored them); here
@@ -150,21 +156,30 @@ export async function flagReadingsInStopPeriods(
   readings: { id: string; takenAt: number }[],
 ): Promise<void> {
   const periods = await stopPeriods(ctx.tx, g.id);
-  const inside = (r: { takenAt: number }, p: StopPeriod) => r.takenAt >= p.start && (p.end === null || r.takenAt <= p.end);
   const flagged = readings.filter((r) => periods.some((p) => inside(r, p)));
   if (flagged.length === 0) return;
-  const openPeriod = periods.find((p) => p.end === null);
+  const openPeriod = currentPeriod(periods);
   const inOpenPeriod = openPeriod !== undefined && flagged.some((r) => inside(r, openPeriod));
   await raiseFlag(ctx, g, flagged.map((r) => r.id), inOpenPeriod);
 }
 
-/** A stop ack can arrive after readings it covers; they raise the flag too. */
-async function flagReadingsAfterStopAck(ctx: Ctx, g: Gateway, ackedAt: number): Promise<void> {
-  const { rows } = await ctx.tx.query(
-    'SELECT reading_id FROM readings WHERE gateway_id = $1 AND taken_at >= $2 ORDER BY taken_at',
-    [g.id, iso(ackedAt)],
+async function readingsIn(db: Db, gatewayId: string, p: StopPeriod): Promise<string[]> {
+  const { rows } = await db.query(
+    `SELECT reading_id FROM readings
+      WHERE gateway_id = $1 AND taken_at >= $2 AND ($3::timestamptz IS NULL OR taken_at <= $3)
+      ORDER BY taken_at, reading_id`,
+    [gatewayId, iso(p.start), iso(p.end)],
   );
-  if (rows.length > 0) await raiseFlag(ctx, g, rows.map((r) => r.reading_id), true);
+  return rows.map((r) => r.reading_id as string);
+}
+
+/** A stop ack can arrive after readings it covers; they raise the flag too. */
+async function flagReadingsAfterStopAck(ctx: Ctx, g: Gateway, stopSeq: number): Promise<void> {
+  const periods = await stopPeriods(ctx.tx, g.id);
+  const period = periods.find((p) => p.stopSeq === stopSeq);
+  if (!period) return;
+  const ids = await readingsIn(ctx.tx, g.id, period);
+  if (ids.length > 0) await raiseFlag(ctx, g, ids, period === currentPeriod(periods));
 }
 
 async function raiseFlag(ctx: Ctx, g: Gateway, readingIds: string[], raiseOnGateway: boolean): Promise<void> {
@@ -176,8 +191,14 @@ async function raiseFlag(ctx: Ctx, g: Gateway, readingIds: string[], raiseOnGate
   if (raiseOnGateway) g.collectingAfterStop = true;
 }
 
-async function clearFlag(ctx: Ctx, g: Gateway): Promise<void> {
+/**
+ * A resume ack ends the stop period it supersedes. The flag stays only while the current
+ * (open) period has readings inside it.
+ */
+async function clearFlagIfPeriodEnded(ctx: Ctx, g: Gateway): Promise<void> {
   if (!g.collectingAfterStop) return;
+  const open = currentPeriod(await stopPeriods(ctx.tx, g.id));
+  if (open && (await readingsIn(ctx.tx, g.id, open)).length > 0) return;
   await appendTimeline(ctx.tx, {
     entityType: 'gateway', entityId: g.id, kind: 'flag', axis: 'flags',
     from: COLLECTING_AFTER_STOP, to: null, effectiveAt: ctx.now, rule: 'resume_acknowledged',

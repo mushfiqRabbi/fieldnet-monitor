@@ -6,7 +6,7 @@ import { Breadcrumb, ErrorNote, Field, Loading, PageHeader } from "./PageParts";
 import { SensorActions } from "./SensorActions";
 import { GatewayLinks, SensorReason } from "./SensorsView";
 import { StatusBadge } from "./StatusBadge";
-import { Held, NextEvaluation } from "./TimeCells";
+import { Held, NextEvaluation, SensorCounter } from "./TimeCells";
 import { Timeline } from "./Timeline";
 
 export function SensorDetailView({ id }: { id: string }) {
@@ -55,10 +55,10 @@ export function SensorDetailView({ id }: { id: string }) {
               <NextEvaluation sensor={s} now={now} />
             </Field>
             <Field label="Quiet checked days">
-              <span className="text-base font-semibold tabular-nums">{s.quiet_checked_days}</span>
+              <SensorCounter sensor={s} counter="quiet_checked_days" className="text-base font-semibold tabular-nums" />
             </Field>
             <Field label="Sampling cycles done">
-              <span className="text-base font-semibold tabular-nums">{s.sampling_cycles_done}</span>
+              <SensorCounter sensor={s} counter="sampling_cycles_done" className="text-base font-semibold tabular-nums" />
             </Field>
             <Field label={`Gateways (${s.gateway_ids.length})`}>
               <GatewayLinks ids={s.gateway_ids} />
@@ -67,7 +67,7 @@ export function SensorDetailView({ id }: { id: string }) {
           <h2 className="mb-2 mt-8 text-lg font-semibold">Timeline</h2>
           {tl.error ? <ErrorNote error={tl.error} hasData={!!tl.data} /> : null}
           {tl.loading ? <Loading what="timeline" /> : null}
-          {tl.data ? <Timeline entries={tl.data.entries} now={now} scope="sensor" /> : null}
+          {tl.data ? <Timeline entries={tl.data} now={now} scope="sensor" /> : null}
         </>
       ) : null}
     </>

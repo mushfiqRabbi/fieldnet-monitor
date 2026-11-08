@@ -141,13 +141,17 @@ Forward-only state machine (the brief: "gateway status is not recomputed backwar
 * `GET /gw/v1/commands` → the latest command if it is unacked, else `[]`.
 
 ### collecting_after_stop
-* A **stop period** starts at the `acked_at` of a stop with `ack_applied` and ends at the
-  `acked_at` of the next resume with `ack_applied` (open-ended if none yet).
+* A **stop period** starts at the recorded `acked_at` of any acknowledged stop (applied or
+  superseded) and ends at the `acked_at` of the first acknowledged resume with a higher
+  seq (open-ended if none yet). A superseded ack never changes the command state, but the
+  device did stop or resume, so it still opens or closes a period.
 * When a batch is accepted, for its accepted readings whose `taken_at` is inside any stop
   period of that gateway: add one timeline entry (kind `flag`, rule
   `collecting_after_stop`, evidence = reading ids). If the period is the gateway's
   current open period, set `collecting_after_stop = true`.
-* An applied resume ack sets it back to false (kind `flag` entry).
+* A stop ack (applied or not) flags readings already stored inside its period.
+* A resume ack sets it back to false (kind `flag` entry) unless the current open period
+  still has readings inside it.
 
 ### Coverage class (`src/domain/coverage.ts`)
 | status | command_state | class |
@@ -204,7 +208,11 @@ Heartbeats follow the same steps (no sensor evidence).
      An empty `readings` list → `processed` with 0 accepted.
   6. All of this is one transaction, so a retried batch never double-counts.
   7. If ≥ 1 accepted: qualifying evidence for the gateway at the max accepted
-     `taken_at`; collecting_after_stop check; recompute the sensor.
+     `taken_at`; collecting_after_stop check.
+  8. Whenever the batch ends `processed`, `partially_processed` or `quarantined` (also
+     after the 5th failure, and when processing threw): recompute its sensor and every
+     sensor whose cycle results name the batch, so a quarantined batch turns their
+     readings outcomes into `could_not_read` at once.
 * `GET /api/v1/batches/{id}` → `{processing, attempts, accepted_count, quarantined}`.
   `attempts` counts processing attempts made (successful one included).
 
@@ -217,12 +225,14 @@ and compare".
 
 ### Input
 * `sensor {id, type, registeredAt}`, `now`.
-* `assignments`: `[{effectiveAt, gatewayIds}]` sorted (initially none = `[]`).
+* `assignments`: `[{effectiveAt, gatewayIds}]` sorted (initially none = `[]`). For the
+  lifecycle replay the first non-empty row counts from the epoch, so evidence dated a few
+  minutes before the PUT still finds coverage; the coverage axis keeps the recorded times.
 * `gatewayLogs`: per gateway, `[{effectiveAt, coverageClass}]` sorted. A gateway's class
   before its first row is `dead`.
 * `outcomes`: `[{gatewayId, cycleId, finishedAt, outcome, batchId}]` for this sensor
   (`outcome` already normalised: readings | no_readings | could_not_read | timed_out).
-* `batches`: map batchId → `{status, gatewayId, arrived: true}` for batches referenced by
+* `batches`: map batchId → `{status, gatewayId, receivedAt}` for batches referenced by
   outcomes or holding readings for this sensor. A referenced id missing from the map has
   not arrived.
 * `readings`: accepted readings for this sensor `[{readingId, batchId, gatewayId, takenAt}]`.
@@ -241,8 +251,10 @@ and compare".
   * batch `quarantined` → resolved as `could_not_read`;
   * batch not arrived and `now >= finishedAt + batchDeadline` → resolved as
     `could_not_read`;
-  * otherwise (not arrived before the deadline, or arrived but `received`/`retrying`)
-    → **unresolved**.
+  * batch `received`/`retrying` that arrived at or after the deadline → `could_not_read`
+    (the day resolved at the deadline "without it arriving");
+  * otherwise (not arrived before the deadline, or arrived in time but still
+    `received`/`retrying`) → **unresolved**.
 * **Day classification** (UTC day `d`, complete when `now >= d+1 00:00`), first match:
   1. reading day: an accepted reading with `takenAt` in `d`;
   2. unresolved: an unresolved readings outcome with `finishedAt` in `d`;
@@ -292,7 +304,10 @@ order**: decommission → coverage change → readings → day boundary → time
 5. **Timer end** at `t = runningSince + remainingMs`:
    * dormant_wait → `sampling` (rule `dormant_wait_elapsed`), timer = sampling_window,
      `remainingMs = samplingWindow`, `windowStart = t`.
-   * sampling_window: "checked" = some `no_readings` outcome with `finishedAt` in
+   * sampling_window: if an unresolved readings outcome has `finishedAt` in
+     `[windowStart, t)`, the result waits (`endedAt = t`; the timer neither runs nor
+     pauses). A later replay that sees the batch resolved evaluates it at `t`.
+     Otherwise "checked" = some `no_readings` outcome with `finishedAt` in
      `[windowStart, t)` from a gateway with class available at `finishedAt`.
      * checked: cycles += 1. If cycles ≥ `samplingCyclesBeforeRetired` → `retired`
        (`no_readings`, rule `sampling_retired`), timer cleared. Else → `dormant` (rule
@@ -365,9 +380,9 @@ deadlines) need no queue: each comes out at its own effective time.
 ## 10. Timeline
 `timeline(entity_type, entity_id, seq, kind, axis, from_value, to_value, effective_at,
 recorded_at, rule, evidence_ids, detail)`. `seq` is per entity, from 1. `kind` ∈
-transition | correction | action | ack | flag | rule_change. API returns `{seq, kind,
-axis, from, to, effective_at, recorded_at, rule, evidence_ids}` plus `detail` when
-present (reason, correction transitions).
+transition | correction | action | ack | flag | rule_change. The API returns a bare
+array of `{seq, kind, axis, from, to, effective_at, recorded_at, rule, evidence_ids}`
+plus `detail` when present (reason, correction transitions).
 
 Axes: gateway `status`, `command_state`, `coverage_class`, `flags`; sensor `lifecycle`,
 `coverage`, `collection`; batch `processing`.

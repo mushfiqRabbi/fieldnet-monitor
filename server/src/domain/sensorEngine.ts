@@ -11,7 +11,7 @@ import type {
 } from '../types';
 import {
   buildContext, classifyDay, collectionAt, collectionSince, coverageAt, hasCheckBetween,
-  timeDrivenChecksAfterNow, type Ctx,
+  hasUnresolvedBetween, timeDrivenChecksAfterNow, type Ctx,
 } from './sensorEngineHelpers';
 
 /** A dormant wait or a sampling window, measured in available time. */
@@ -23,6 +23,11 @@ interface Timer {
   runningSince: number | null;
   /** Sampling windows only: when the current window opened. */
   windowStart: number;
+  /**
+   * Sampling windows only: the window ended at this time, but its result waits for an
+   * unresolved readings outcome inside it (brief: "waits until the day resolves").
+   */
+  endedAt: number | null;
 }
 
 interface State {
@@ -85,14 +90,14 @@ export function replaySensor(input: ReplayInput): ReplayResult {
     st.deferredDormant = false;
     st.timer = {
       kind: 'dormant_wait', remainingMs: Math.max(1, settingsAt(input.config, at).dormantWaitMs),
-      runningSince: st.coverage === 'available' ? at : null, windowStart: at,
+      runningSince: st.coverage === 'available' ? at : null, windowStart: at, endedAt: null,
     };
   };
 
   const startWindow = (at: number) => {
     st.timer = {
       kind: 'sampling_window', remainingMs: Math.max(1, settingsAt(input.config, at).samplingWindowMs), // >= 1ms: the loop must advance
-      runningSince: st.coverage === 'available' ? at : null, windowStart: at,
+      runningSince: st.coverage === 'available' ? at : null, windowStart: at, endedAt: null,
     };
   };
 
@@ -116,12 +121,13 @@ export function replaySensor(input: ReplayInput): ReplayResult {
       st.quiet = 0;
       st.cycles = 0;
     }
-    if (prev === 'available' && next !== 'available' && st.timer && st.timer.runningSince !== null) {
+    const waiting = st.timer !== null && st.timer.endedAt !== null; // already ended: nothing to pause
+    if (prev === 'available' && next !== 'available' && st.timer && !waiting && st.timer.runningSince !== null) {
       st.timer.remainingMs -= at - st.timer.runningSince; // pause
       st.timer.runningSince = null;
     }
     if (prev !== 'available' && next === 'available') {
-      if (st.timer && st.timer.runningSince === null) st.timer.runningSince = at; // resume
+      if (st.timer && !waiting && st.timer.runningSince === null) st.timer.runningSince = at; // resume
       if (st.lifecycle === 'active' && st.deferredDormant && !st.blocked
         && st.quiet >= settingsAt(input.config, at).quietDaysBeforeDormant) {
         enterDormant(at, 'quiet_days');
@@ -173,6 +179,12 @@ export function replaySensor(input: ReplayInput): ReplayResult {
       startWindow(at);
       return;
     }
+    if (hasUnresolvedBetween(ctx, timer.windowStart, at)) {
+      // The result depends on a batch not resolved yet. Hold it; once the batch resolves, a
+      // later replay evaluates the window here, effective at its end.
+      timer.endedAt = at;
+      return;
+    }
     const checked = hasCheckBetween(ctx, timer.windowStart, at);
     if (!checked) {
       // The window saw no check: it does not count as a cycle.
@@ -201,7 +213,7 @@ export function replaySensor(input: ReplayInput): ReplayResult {
       candidates.push({ at: ctx.readings[readingIdx].takenAt, kind: 'reading' });
     }
     if (st.lifecycle === 'active') candidates.push({ at: st.nextBoundary, kind: 'day_boundary' });
-    if (st.timer && st.timer.runningSince !== null) {
+    if (st.timer && st.timer.runningSince !== null && st.timer.endedAt === null) {
       candidates.push({ at: st.timer.runningSince + Math.max(st.timer.remainingMs, 0), kind: 'timer_end' });
     }
     let best: NextEvent | null = null;
@@ -241,8 +253,9 @@ export function replaySensor(input: ReplayInput): ReplayResult {
 function summarize(ctx: Ctx, st: State, transitions: LifecycleTransition[]): ReplayResult {
   const { now } = ctx;
   const decommissioned = st.lifecycle === 'decommissioned';
-  const timerEnd = st.timer && st.timer.runningSince !== null
-    ? st.timer.runningSince + Math.max(st.timer.remainingMs, 0)
+  // A window waiting on an unresolved batch shows the time it ended.
+  const timerEnd = st.timer && st.timer.endedAt !== null ? st.timer.endedAt
+    : st.timer && st.timer.runningSince !== null ? st.timer.runningSince + Math.max(st.timer.remainingMs, 0)
     : null;
 
   // The server time at which the current wait or window ends; null while paused.
@@ -256,7 +269,7 @@ function summarize(ctx: Ctx, st: State, transitions: LifecycleTransition[]): Rep
   const nextCheckAt = decommissioned ? null : Math.min(...checks);
 
   const coverage = coverageAt(ctx, now);
-  const lastCoverageChange = [...ctx.coverageChanges].reverse().find((c) => c.at <= now);
+  const lastCoverageChange = [...ctx.recordedCoverageChanges].reverse().find((c) => c.at <= now);
 
   return {
     transitions,

@@ -125,3 +125,9 @@ describe('test endpoints', () => {
     expect((await api().get('/api/v1/sensors')).body.items).toEqual([]);
   });
 });
+
+describe('GET /healthz', () => {
+  it('answers 200 once the API reaches the database (compose healthcheck, simulator start)', async () => {
+    expect((await api().get('/healthz')).body).toEqual({ ok: true });
+  });
+});

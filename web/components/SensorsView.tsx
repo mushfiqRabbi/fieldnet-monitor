@@ -8,7 +8,7 @@ import { FilterSelect } from "./FilterSelect";
 import { Empty, ErrorNote, LINK, Loading, PageHeader, TD, TH } from "./PageParts";
 import { SensorActions } from "./SensorActions";
 import { StatusBadge } from "./StatusBadge";
-import { Held, NextEvaluation, NotApplicable } from "./TimeCells";
+import { Held, NextEvaluation, NotApplicable, SensorCounter } from "./TimeCells";
 import { humanize } from "@/lib/format";
 
 export interface SensorFilters {
@@ -126,8 +126,12 @@ export function SensorsView({ filters }: { filters: SensorFilters }) {
                     <td className={TD}>
                       <NextEvaluation sensor={s} now={data.server_now} />
                     </td>
-                    <td className={`${TD} text-right tabular-nums`}>{s.quiet_checked_days}</td>
-                    <td className={`${TD} text-right tabular-nums`}>{s.sampling_cycles_done}</td>
+                    <td className={`${TD} text-right tabular-nums`}>
+                      <SensorCounter sensor={s} counter="quiet_checked_days" />
+                    </td>
+                    <td className={`${TD} text-right tabular-nums`}>
+                      <SensorCounter sensor={s} counter="sampling_cycles_done" />
+                    </td>
                     <td className={TD}>
                       <GatewayLinks ids={s.gateway_ids} />
                     </td>

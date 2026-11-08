@@ -92,7 +92,7 @@ export function GatewayDetailView({ id }: { id: string }) {
           <h2 className="mb-2 mt-8 text-lg font-semibold">Timeline</h2>
           {tl.error ? <ErrorNote error={tl.error} hasData={!!tl.data} /> : null}
           {tl.loading ? <Loading what="timeline" /> : null}
-          {tl.data ? <Timeline entries={tl.data.entries} now={now} scope="gateway" /> : null}
+          {tl.data ? <Timeline entries={tl.data} now={now} scope="gateway" /> : null}
         </>
       ) : null}
     </>

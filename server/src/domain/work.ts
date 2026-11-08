@@ -74,7 +74,11 @@ export async function runDueWork(now: number): Promise<void> {
       if (item.kind !== 'batch') throw err;
       // Processing itself failed: that is a failed attempt, not a stuck batch.
       console.error(`processing batch ${item.id} failed`, err);
-      await withWriteTx(async (tx) => failBatchAttempt(await makeCtx(tx, item.due), item.id));
+      await withWriteTx(async (tx) => {
+        const ctx = await makeCtx(tx, item.due);
+        await failBatchAttempt(ctx, item.id);
+        await recomputeDirty(ctx); // the 5th failure quarantines it, which resolves its outcomes
+      });
     }
   }
   await recomputeDueSensors(now);

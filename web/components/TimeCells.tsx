@@ -46,6 +46,31 @@ export function NotApplicable({ hint }: { hint?: string }) {
 }
 
 /**
+ * A sensor counter, or the "not applicable" dash where its lifecycle does not use it:
+ * quiet days count only while active, sampling cycles only while dormant or sampling.
+ * The API value is still an integer (0) in those lifecycles.
+ */
+export function SensorCounter({
+  sensor,
+  counter,
+  className,
+}: {
+  sensor: Sensor;
+  counter: "quiet_checked_days" | "sampling_cycles_done";
+  className?: string;
+}) {
+  const applies =
+    counter === "quiet_checked_days"
+      ? sensor.lifecycle === "active"
+      : sensor.lifecycle === "dormant" || sensor.lifecycle === "sampling";
+  if (!applies) {
+    const what = counter === "quiet_checked_days" ? "Quiet days count only while active." : "Sampling cycles count only while dormant or sampling.";
+    return <NotApplicable hint={`${what} This sensor is ${sensor.lifecycle}.`} />;
+  }
+  return <span className={className}>{sensor[counter]}</span>;
+}
+
+/**
  * Next evaluation, three different looks:
  *  - a real time:      relative + absolute
  *  - "Paused":         dormant/sampling with coverage not available (timer exists but is held)

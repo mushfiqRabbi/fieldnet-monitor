@@ -6,6 +6,8 @@ import {
 
 useCleanDatabase();
 
+const MIN = 60_000;
+
 describe('sensor coverage', () => {
   it('follows the best class among the covering gateways, and none without any', async () => {
     const token = await addGateway('gw-1');
@@ -58,6 +60,30 @@ describe('sensor coverage', () => {
   });
 });
 
+describe('evidence dated before the coverage assignment', () => {
+  it('a reading taken minutes before the PUT still wakes the sensor (readings are facts)', async () => {
+    const token = await addGateway();
+    await addSensor();
+    await cover('s-1', ['gw-1']).expect(200);
+    await cycle(token, 'c1', T0 - 5 * MIN, [{ sensor_id: 's-1', outcome: 'readings', batch_id: 'b1' }]).expect(202);
+    await putBatch(token, 'b1', 's-1', [reading('r1', T0 - 6 * MIN)]).expect(202);
+    await drain();
+    expect(await sensor()).toMatchObject({
+      lifecycle: 'active', lifecycle_since: iso(T0 - 6 * MIN), coverage: 'available', collection: 'readings',
+    });
+    const coverage = (await timeline('sensors', 's-1')).find((e) => e.axis === 'coverage');
+    expect(coverage).toMatchObject({ from: 'none', effective_at: iso(T0) }); // the PUT keeps server time
+  });
+
+  it('a sensor with no assignment stays pending with coverage none', async () => {
+    const token = await addGateway();
+    await addSensor();
+    await putBatch(token, 'b1', 's-1', [reading('r1', T0 - MIN)]).expect(202);
+    await drain();
+    expect(await sensor()).toMatchObject({ lifecycle: 'pending', coverage: 'none' });
+  });
+});
+
 describe('decommission', () => {
   it('needs a reason, is terminal, and any later action or coverage change is 409', async () => {
     await addGateway();
@@ -97,6 +123,9 @@ describe('sensor timeline and late data', () => {
     await putBatch(token, 'b1', 's-1', [reading('r1', T0)]).expect(202);
     await drain();
     const entries = await timeline('sensors', 's-1');
+    // a bare JSON array, as the brief lists it (no wrapper object), for both entity kinds
+    expect(Array.isArray((await api().get('/api/v1/sensors/s-1/timeline')).body)).toBe(true);
+    expect(Array.isArray((await api().get('/api/v1/gateways/gw-1/timeline')).body)).toBe(true);
     expect(entries.map((e) => e.seq)).toEqual(entries.map((_, i) => i + 1));
     expect(entries.map((e) => [e.kind, e.axis, e.from, e.to])).toEqual([
       ['transition', 'coverage', 'none', 'recoverable'],

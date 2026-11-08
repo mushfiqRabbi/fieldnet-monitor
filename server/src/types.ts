@@ -41,7 +41,10 @@ export interface ConfigVersion {
 export interface ReplayInput {
   sensor: { id: string; type: SensorType; registeredAt: number };
   now: number;
-  /** Sorted by effectiveAt. Before the first row the sensor has no gateways. */
+  /**
+   * Sorted by effectiveAt (server time of each PUT). Before the first row the sensor has no
+   * gateways. The replay counts the first non-empty row from the epoch (DECISIONS.md).
+   */
   assignments: { effectiveAt: number; gatewayIds: string[] }[];
   /** Per gateway, sorted by effectiveAt. Before its first row a gateway is `dead`. */
   gatewayLogs: Record<string, { effectiveAt: number; coverageClass: GatewayCoverageClass }[]>;
@@ -53,8 +56,12 @@ export interface ReplayInput {
     outcome: Outcome;
     batchId: string | null;
   }[];
-  /** Batches that arrived and are referenced by outcomes or hold readings for this sensor. */
-  batches: Record<string, { status: BatchStatus; gatewayId: string }>;
+  /**
+   * Batches that arrived and are referenced by outcomes or hold readings for this sensor.
+   * `receivedAt` is when it arrived: a batch that arrived after its deadline did not stop the
+   * day from resolving at the deadline.
+   */
+  batches: Record<string, { status: BatchStatus; gatewayId: string; receivedAt: number }>;
   /** Accepted readings for this sensor, any order. */
   readings: { readingId: string; batchId: string; gatewayId: string; takenAt: number }[];
   decommission: { at: number; reason: string } | null;

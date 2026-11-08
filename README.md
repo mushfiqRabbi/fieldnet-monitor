@@ -36,7 +36,7 @@ TEST_MODE=0 docker compose up --build
 docker compose run --rm test
 ```
 
-This runs 176 tests against a separate database (`fieldnet_test`), so it does not touch the
+This runs 195 tests against a separate database (`fieldnet_test`), so it does not touch the
 console's data:
 
 * `server/test/sensorEngine.test.ts`: the pure sensor engine, including the brief's worked

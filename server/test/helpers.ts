@@ -100,5 +100,5 @@ export function gatewayAction(id: string, action: string, reason?: string) {
 }
 
 export async function timeline(kind: 'gateways' | 'sensors', id: string) {
-  return (await api().get(`/api/v1/${kind}/${id}/timeline`).expect(200)).body.entries as any[];
+  return (await api().get(`/api/v1/${kind}/${id}/timeline`).expect(200)).body as any[];
 }

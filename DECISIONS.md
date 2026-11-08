@@ -4,112 +4,90 @@ Backend: Node 22 + Express + TypeScript + PostgreSQL (`pg`, plain SQL). The empl
 to Express in place of Django/DRF; every rule and endpoint of the brief is unchanged. The
 longer blueprint is `docs/DESIGN.md`.
 
-## How state and time are modelled
+## State and time
 
-* **Evidence is append-only** (`heartbeats`, `cycles`, `cycle_results`, `batches`,
-  `readings`, `commands`, `sensor_assignment_log`, `gateway_state_log`). Current state is a
-  projection on `gateways` / `sensors`. The `timeline` table is append-only too.
-* **Gateways are a forward-only state machine** (`domain/gateway.ts`, `domain/commands.ts`),
-  as the brief says: gateway status is never recomputed backwards. Every change of status or
-  command state also writes a `gateway_state_log` row with its derived coverage class.
-  That log is the **coverage history**.
-* **Sensors are a pure replay** (`domain/sensorEngine.ts`). `replaySensor(input)` takes all
-  evidence, the coverage history, operator actions and the versioned config, and replays the
-  sensor from registration to `now`. It never touches the DB or the clock. Live updates, timers,
-  late data and test-clock jumps all go through the same path: replay again, then compare with
-  the history we hold (`domain/sensorStore.ts`).
-* **Clocks.** `clock.ts` is the only reader of the wall clock; in test mode it returns the test
-  clock. Engine code uses epoch ms. Each change carries `effective_at` (when it happened by the
-  brief's rules: event time, due time or server time, per the brief's clock table) and
-  `recorded_at` (server clock when we wrote it).
-* **One writer at a time.** Every state change runs in a transaction holding one Postgres
-  advisory lock, so requests, operator actions and background work never interleave. The only
-  exception is the insert in `PUT /gw/v1/batches`, so it can answer 202 at once.
+* **Evidence is append-only** (heartbeats, cycles, batches, readings, commands, assignment
+  and gateway state logs), and so is `timeline`. Current state is a projection on
+  `gateways` / `sensors`.
+* **Gateways are a forward-only state machine**, never recomputed backwards (brief). Each
+  change of status or command state writes a `gateway_state_log` row with its coverage
+  class: that log is the coverage history.
+* **Sensors are a pure replay.** `replaySensor(input)` takes all evidence, the coverage
+  history, operator actions and versioned config, and replays the sensor from registration
+  to `now`, with no DB or clock. Live updates, timers, late data and clock jumps all replay
+  again and compare with the stored history.
+* **Clocks.** `clock.ts` is the only clock reader. Entries carry `effective_at` (event, due
+  or server time, per the brief) and `recorded_at`.
+* **One writer.** Every change runs in a transaction holding one advisory lock; only the
+  `PUT /gw/v1/batches` insert skips it, to answer 202 at once.
 
-## Where each rule lives
+## Where each rule lives (`server/src/domain/`)
 
 | Rule | File |
 |---|---|
-| Gateway status, operator actions, unsuspend derivation | `domain/gateway.ts` |
-| Stop/resume, acks, timeouts, `collecting_after_stop` | `domain/commands.ts` |
-| Coverage class, state log, which sensors to recompute | `domain/coverage.ts` |
-| Cycle ingestion, idempotency, ignored sensors | `domain/cycles.ts` |
-| Batch validation, retries, quarantine, duplicate readings | `domain/batches.ts` |
-| Sensor days, quiet counts, waits, windows, collection | `domain/sensorEngine.ts` + `sensorEngineHelpers.ts` |
-| History diff, transitions vs correction entries | `domain/sensorStore.ts` |
-| Background work and the test clock | `domain/work.ts`, `routes/testApi.ts` |
+| Gateway status, operator actions; stop/resume, acks, `collecting_after_stop` | `gateway.ts`, `commands.ts` |
+| Coverage class, state log; cycles; batches, retries, duplicates | `coverage.ts`, `cycles.ts`, `batches.ts` |
+| Sensor days, quiet counts, waits, windows, collection | `sensorEngine.ts`, `sensorEngineHelpers.ts` |
+| History diff and corrections; due work and test clock | `sensorStore.ts`, `work.ts` |
 
-## Background work, retries, late data, corrections
+## Retries, late data, corrections
 
-* **Background work is a DB-backed due-work loop**, not a job queue. `runDueWork(now)` finds
-  the earliest due item ≤ now (batch to process, retry, stale timer, command timeout),
-  handles it **at its due time**, and repeats. Then it replays the sensors whose `next_check_at`
-  has passed. The `worker` service calls it every second in live mode. In test mode only
-  `/test/clock` and `/test/drain` call it, so every transition gets its own due time, never the
-  jump time. Sensor timers need no queue, because the replay produces them.
-* **Retries:** a failed attempt k waits 2^(k-1) minutes; the 5th failure quarantines the batch
-  with `processing_failed`. One attempt is one transaction, so a retried batch never
-  double-counts. Reading ids are globally unique: first processed wins, same content is ignored,
-  different content is quarantined as `conflicting_duplicate`.
-* **Idempotency:** cycles are keyed by (gateway, cycle_id) and batches by batch_id, with a hash
-  of the canonical JSON body. An identical repeat is 200 and changes nothing; a different body
-  is 409. Acks are idempotent.
-* **Corrections:** after each replay we compare the new transition list H′ with the stored H.
-  Equal: nothing. H is a prefix of H′: append the new transitions (normal progress). Otherwise:
-  **one** `correction` entry with the old and new current state, the replaced and the
-  recomputed transitions, and the evidence ids that caused it. Old entries are never edited;
-  `lifecycle_since` comes from the last transition of H′.
+* **Background work is a DB-backed due-work loop.** `runDueWork(now)` takes the earliest due
+  item (batch, retry, stale timer, command timeout), handles it at its due time, repeats,
+  then replays sensors whose `next_check_at` passed. The `worker` runs it every second in
+  live mode; in test mode only the test endpoints do.
+* **Retries:** attempt k waits 2^(k-1) min; the 5th failure quarantines (`processing_failed`).
+  One attempt is one transaction, so nothing double-counts. First processed reading id wins.
+* **Idempotency:** cycles and batches are keyed by id plus a hash of the canonical body;
+  an identical repeat is 200, a different one 409. Acks are idempotent.
+* **Corrections:** new history H′ vs stored H. Equal: nothing. H a prefix of H′: append the
+  new transitions. Otherwise one `correction` entry with old and new state, replaced and
+  recomputed transitions and the causing evidence ids. `lifecycle_since` comes from H′.
 
 ## Interpretations
 
-1. **The worked example needs G to stay connected.** With one cycle a day at 12:00, the brief's
-   12-hour rule makes G `stale` from 00:00 to 12:00 every night. Its coverage becomes
-   `recoverable` and S's timers pause, so the example's dates would not hold. The brief also
-   counts 36 hours from day 29 00:00 to day 30 12:00, which only works if G was available all
-   along. We apply the rules as written. Our end-to-end test keeps G connected the realistic
-   way: G sends a cycle every 8 hours for a second sensor, and reports S at 12:00 as in the
-   example.
-2. Quiet days and window checks need the reporting gateway to be `available` at the outcome's
-   `finished_at`. If the 14th quiet day completes while coverage is not available, the sensor
-   stays `active` ("lifecycle unchanged") and goes dormant the moment coverage is available again.
-3. An unresolved day stops quiet counting until a later replay sees it resolved, or until a
-   reading resets the count. A batch that has arrived but is still `received`/`retrying` stays
-   unresolved; one that has not arrived resolves as `could_not_read` at `finished_at + 24h`.
-4. While coverage is `none`, readings are kept but change no lifecycle (the coverage table lists
-   "readings still wake it" only for `stopped`/`recoverable`). `retired (no_readings)` stays as
-   it is when coverage drops to `none`; only `active`/`dormant`/`sampling` retire with
-   `no_live_coverage`.
-5. `spare` is not in the coverage table; a spare gateway covers nothing, so we call it `recoverable`.
-6. Commands: `stop` is 409 only in `stop_pending`/`stopped`, `resume` only in `running` (as
-   written). So stop from `stop_failed` and resume from `resume_pending`/`resume_failed` re-issue
-   the command (new seq, new timeout). A stop period starts only at an ack that changed the state.
-7. A stale gateway ignores qualifying evidence older than 12 hours entirely ("updates
-   nothing"), including `last_qualifying_at`. "Within the last 12 hours" is strict.
-8. A cycle result for a sensor the gateway does not cover, including an unknown id, is listed
-   in `ignored` (not 404). A batch for an unknown sensor is accepted (202) and then quarantined
-   (`unknown_sensor`), as the batch section says.
-9. Gateway transition times are never earlier than the gateway's previous change, so its
-   history stays ordered when device clocks disagree. A decommissioned sensor is frozen: later
-   evidence is stored but never replayed.
-10. `effective_at` for an ack is `acked_at` (clamped to ≥ `issued_at`). For a heartbeat, the
-    auth-failure time is `sent_at`. `last_heartbeat_at` is the received time (brief).
+1. **The worked example needs G to stay connected.** One cycle a day makes G `stale` every
+   night (12-hour rule), pausing S's timers. We apply the rules as written; the end-to-end
+   test keeps G connected with a cycle every 8 hours for a second sensor.
+2. Quiet days and window checks need the gateway `available` at `finished_at`. A 14th quiet
+   day while coverage is not available keeps S `active` until coverage returns.
+3. An unresolved day stops quiet counting; a sampling window whose span holds an unresolved
+   readings outcome waits, then is evaluated effective at the window end.
+4. "Without it arriving": a batch that arrived in time but is still `received`/`retrying`
+   keeps its day unresolved past 24 h. One that arrives after `finished_at + 24h` did not
+   arrive in time: the day stays `could_not_read` until the batch ends (readings then
+   correct it as late data).
+5. **A sensor's first assignment counts from the epoch** for the lifecycle replay, like a
+   gateway's first log row: devices report after the fact, so evidence dated before the
+   PUT still finds coverage. Later changes keep server time; the coverage axis shows the
+   PUT time; an unassigned sensor stays `pending`/`none`.
+6. While coverage is `none`, readings change no lifecycle. `retired (no_readings)` stays
+   when coverage drops to `none`; only active/dormant/sampling retire (`no_live_coverage`).
+7. `spare` is not in the coverage table; a spare gateway covers nothing: `recoverable`.
+8. Stop is 409 only in `stop_pending`/`stopped`, resume only in `running`, so other states
+   re-issue. A stop period uses recorded `acked_at` values, superseded acks included: from
+   a stop's ack to the ack of the next resume by seq. A superseded ack never changes state.
+9. A stale gateway ignores evidence older than 12 hours entirely, even `last_qualifying_at`.
+10. A cycle result for a sensor the gateway does not cover is `ignored`, not 404. A batch for
+    an unknown sensor is 202, then quarantined (`unknown_sensor`).
+11. Gateway transitions are never earlier than its previous change. A decommissioned sensor
+    is frozen. An ack is effective at `acked_at` (≥ `issued_at`).
+12. Timelines return a bare JSON array: the brief names no wrapper there, unlike `commands`.
 
-## Trade-offs (documented compromises)
+## Trade-offs
 
-* **No 503/Retry-After load shedding.** Every write is idempotent, so a client retry is safe.
-* **A sensor replay is O(its history).** It is fine for this scale. In production I would
-  snapshot the replay state per day and replay only from the earliest affected snapshot.
-* **The timeline collapses coverage/collection flips.** If coverage or collection changes
-  several times inside one clock jump, we record the net change, effective when the current
-  value began. Lifecycle transitions are never collapsed.
-* **The single global write lock** trades throughput for simple, provable ordering.
-* Console filters are only the simple ones (status / lifecycle / coverage / collection). No
-  pagination, no UI tests.
+* No 503/Retry-After load shedding; every write is idempotent, so retries are safe.
+* A replay is O(sensor history); production would snapshot per day.
+* Coverage/collection flips inside one clock jump are recorded as the net change.
+* The single write lock trades throughput for provable ordering.
+* Console filters are simple; no pagination, no UI tests.
 
 ## What I know is wrong or weak
 
-* Config is versioned (`config_versions`, read per moment by the engine), but there is no API
-  to change it yet, so `rule_change` entries are never written.
-* A batch processed by the worker in live mode uses its due time as its processed time, which
-  can be up to a second earlier than the real time.
-* Batches that arrive late for a decommissioned sensor are stored but never shown on its timeline.
+* Default `docker compose up` runs `TEST_MODE=1`, so the worker idles; use `TEST_MODE=0`
+  for live mode.
+* Config is versioned, but no API changes it, so `rule_change` entries are never written.
+* In live mode a batch's processed time is its due time, up to a second early.
+* Late batches for a decommissioned sensor are stored but not shown on its timeline.
+* A reading taken after a held window end wakes the sensor at once; when the batch resolves,
+  the replay inserts the window result first, so that history is recorded as a correction.

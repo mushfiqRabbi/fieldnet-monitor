@@ -1,5 +1,5 @@
 import { Checker, type Story } from './assert';
-import { BASE_URL, Client } from './client';
+import { BASE_URL, Client, waitForApi } from './client';
 import { flakyUpload } from './stories/flakyUpload';
 import { ignoredStop } from './stories/ignoredStop';
 import { lateBatch } from './stories/lateBatch';
@@ -40,6 +40,7 @@ async function main(): Promise<number> {
     return 2;
   }
 
+  await waitForApi();
   console.log(`playing ${chosen.length} stor${chosen.length === 1 ? 'y' : 'ies'} against ${BASE_URL}`);
   const results: boolean[] = [];
   for (const story of chosen) results.push(await runStory(story));

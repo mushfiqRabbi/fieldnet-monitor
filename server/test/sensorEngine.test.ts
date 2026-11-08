@@ -40,16 +40,21 @@ class Scenario {
     return this;
   }
 
-  /** A readings outcome. `batch` says what the batch is: a status, or 'missing' if it never arrives. */
-  readingsCycle(gatewayId: string, finishedAt: number, batchId: string, batch: BatchStatus | 'missing') {
+  /**
+   * A readings outcome. `batch` says what the batch is: a status, or 'missing' if it never
+   * arrives. The batch arrives at `receivedAt` (default: with the cycle).
+   */
+  readingsCycle(
+    gatewayId: string, finishedAt: number, batchId: string, batch: BatchStatus | 'missing', receivedAt = finishedAt,
+  ) {
     this.outcomes.push({ gatewayId, cycleId: `c${this.n++}`, finishedAt, outcome: 'readings', batchId });
-    if (batch !== 'missing') this.batches[batchId] = { status: batch, gatewayId };
+    if (batch !== 'missing') this.batches[batchId] = { status: batch, gatewayId, receivedAt };
     return this;
   }
 
   /** An accepted reading inside a processed batch. */
   reading(gatewayId: string, takenAt: number, readingId: string, batchId = `batch-${readingId}`) {
-    this.batches[batchId] = { status: 'processed', gatewayId };
+    this.batches[batchId] = { status: 'processed', gatewayId, receivedAt: this.batches[batchId]?.receivedAt ?? takenAt };
     this.readings.push({ readingId, batchId, gatewayId, takenAt });
     return this;
   }
@@ -935,5 +940,121 @@ describe('edge cases', () => {
         'coverage_restored', 'operator_decommission',
       ]).toContain(rule);
     }
+  });
+});
+
+describe('evidence dated before the first assignment', () => {
+  // Registered and assigned at day 0 12:05; the gateway's evidence is dated a few minutes earlier.
+  const build = () => new Scenario()
+    .assign(D(0, 12, 5), 'G')
+    .gateway('G', [0, 'recoverable'], [D(0, 12), 'available'])
+    .readingsCycle('G', D(0, 12), 'b0', 'processed')
+    .reading('G', D(0, 11, 55), 'early', 'b0');
+
+  it('a reading taken before the PUT still wakes the sensor, at its taken_at', () => {
+    const s = build();
+    s.registeredAt = D(0, 12, 5);
+    const r = s.at(D(0, 12, 10));
+    expect(view(r)).toMatchObject({ lifecycle: 'active', since: D(0, 11, 55), coverage: 'available', collection: 'readings' });
+    expect(r.transitions).toEqual([
+      { from: 'pending', to: 'active', reason: null, effectiveAt: D(0, 11, 55), rule: 'first_reading', evidenceIds: ['early'] },
+    ]);
+  });
+
+  it('the coverage axis still starts at the PUT (server time)', () => {
+    const s = build();
+    s.registeredAt = D(0, 12, 5);
+    expect(s.at(D(0, 12, 10)).coverageSince).toBe(D(0, 12, 5));
+  });
+
+  it('only the first assignment counts from the epoch: a later one keeps its server time', () => {
+    const s = new Scenario()
+      .assign(D(0), 'G').assign(D(5)).assign(D(8), 'G')
+      .gateway('G', [0, 'available'])
+      .reading('G', D(7), 'while-unassigned');
+    const r = s.at(D(9));
+    expect(r.transitions).toEqual([]); // the reading at day 7 had no coverage: stays pending
+    expect(view(r)).toMatchObject({ lifecycle: 'pending', coverage: 'available' });
+  });
+
+  it('an empty assignment before the first real one carries nothing', () => {
+    const s = new Scenario().assign(D(1)).assign(D(2), 'G').gateway('G', [0, 'available']).reading('G', D(1, 12), 'r');
+    expect(s.at(D(3)).lifecycle).toBe('active');
+  });
+});
+
+describe('a sampling window with an unresolved readings outcome', () => {
+  // The worked example, but on day 31 G reports readings whose batch has arrived and is not
+  // processed yet. The day-29 window ends at day 32 00:00.
+  const build = (batch: BatchStatus | 'missing') => {
+    const s = workedExample(30).readingsCycle('G', D(31, 12), 'b31', batch);
+    for (let n = 32; n <= 40; n++) s.cycle('G', D(n, 12), 'no_readings');
+    return s;
+  };
+  const beforeEnd = build('received').at(D(31, 23));
+
+  it('waits at the window end: still sampling, no transition, cycles unchanged', () => {
+    const r = build('received').at(D(32, 6));
+    expect(view(r)).toMatchObject({ lifecycle: 'sampling', since: D(29), cycles: 0 });
+    expect(r.transitions).toEqual(beforeEnd.transitions);
+  });
+
+  it('a batch that never arrives: waits until the deadline, which wakes it, then dormant at the window end', () => {
+    const waiting = build('missing').at(D(32, 6));
+    expect(waiting.lifecycle).toBe('sampling');
+    expect(waiting.nextCheckAt).toBe(D(32, 12));
+    const r = build('missing').at(D(32, 12));
+    expect(view(r)).toMatchObject({ lifecycle: 'dormant', since: D(32), cycles: 1, next: D(46) });
+  });
+
+  it('processed with a reading inside the window: active at taken_at, history only grows (no correction)', () => {
+    const s = build('processed').reading('G', D(31, 11, 58), 'r31', 'b31');
+    const r = s.at(D(32, 7));
+    expect(view(r)).toMatchObject({ lifecycle: 'active', since: D(31, 11, 58) });
+    expect(r.transitions.slice(0, beforeEnd.transitions.length)).toEqual(beforeEnd.transitions);
+    expect(r.transitions.at(-1)).toMatchObject({ from: 'sampling', to: 'active', rule: 'reading_in_window' });
+  });
+
+  it('quarantined: dormant at the window end (day 32 00:00) with cycles 1', () => {
+    const r = build('quarantined').at(D(32, 7));
+    expect(view(r)).toMatchObject({ lifecycle: 'dormant', since: D(32), cycles: 1 });
+    expect(r.transitions.at(-1)).toMatchObject({ rule: 'sampling_window_checked', effectiveAt: D(32) });
+    expect(r.transitions.slice(0, beforeEnd.transitions.length)).toEqual(beforeEnd.transitions);
+  });
+
+  it('a window restart (no check) waits too', () => {
+    const s = new Scenario().assign(D(0), 'G').gateway('G', [D(0), 'available'])
+      .readingsCycle('G', D(0, 12), 'b0', 'processed').reading('G', D(0, 12), 'r0', 'b0');
+    for (let n = 1; n <= 14; n++) s.cycle('G', D(n, 12), 'no_readings');
+    s.readingsCycle('G', D(30, 12), 'b30', 'retrying');
+    expect(view(s.at(D(33)))).toMatchObject({ lifecycle: 'sampling', since: D(29) });
+    s.batches.b30.status = 'quarantined';
+    expect(s.at(D(33)).transitions.at(-1)).toMatchObject({ rule: 'sampling_window_restart', effectiveAt: D(32) });
+  });
+});
+
+describe('a batch that arrives after its deadline', () => {
+  const base = () => {
+    const s = new Scenario().assign(D(0), 'G').gateway('G', [D(0), 'available'])
+      .readingsCycle('G', D(0, 12), 'b0', 'processed').reading('G', D(0, 12), 'r0', 'b0');
+    for (let n = 1; n <= 13; n++) s.cycle('G', D(n, 12), 'no_readings');
+    return s;
+  };
+
+  it('the day resolved at the deadline stays resolved while the late batch is only received', () => {
+    // Day 14's batch arrives on day 16 06:00, after its deadline (day 15 12:00).
+    const s = base().readingsCycle('G', D(14, 12), 'late', 'received', D(16, 6));
+    for (let n = 15; n <= 20; n++) s.cycle('G', D(n, 12), 'no_readings');
+    expect(view(s.at(D(16)))).toMatchObject({ lifecycle: 'dormant', since: D(16) });
+    // Received but not processed yet: day 14 does not become unresolved again.
+    const r = s.at(D(16, 7));
+    expect(view(r)).toMatchObject({ lifecycle: 'dormant', since: D(16) });
+    expect(r.transitions).toEqual(s.at(D(16)).transitions);
+  });
+
+  it('one that arrived in time but is still retrying stays unresolved past the deadline', () => {
+    const s = base().readingsCycle('G', D(14, 12), 'slow', 'retrying', D(14, 13));
+    for (let n = 15; n <= 20; n++) s.cycle('G', D(n, 12), 'no_readings');
+    expect(view(s.at(D(17)))).toMatchObject({ lifecycle: 'active', quiet: 13 });
   });
 });

@@ -62,12 +62,12 @@ entries `{replaced: [...], transitions: [...]}`.
 |---|---|
 | `GET /api/v1/gateways?status=connected` | `{"server_now", "items": [Gateway]}`. `status` filter optional |
 | `GET /api/v1/gateways/{id}` | Gateway |
-| `GET /api/v1/gateways/{id}/timeline` | `{"entries": [TimelineEntry]}` oldest first |
+| `GET /api/v1/gateways/{id}/timeline` | `[TimelineEntry]` (a bare array, as the brief lists it), oldest first |
 | `POST /api/v1/gateways` `{gateway_id, name}` | 201 `{"token"}` |
 | `POST /api/v1/gateways/{id}/actions` `{action, reason}` | `suspend` (reason required), `unsuspend`, `mark_spare`, `retire`, `stop`, `resume` → Gateway |
 | `GET /api/v1/sensors?lifecycle=&coverage=&collection=` | `{"server_now", "items": [Sensor]}`. Filters optional |
 | `GET /api/v1/sensors/{id}` | Sensor |
-| `GET /api/v1/sensors/{id}/timeline` | `{"entries": [TimelineEntry]}` |
+| `GET /api/v1/sensors/{id}/timeline` | `[TimelineEntry]`, oldest first |
 | `POST /api/v1/sensors` `{sensor_id, type}` | 201 Sensor |
 | `PUT /api/v1/sensors/{id}/coverage` `{gateway_ids}` | Sensor |
 | `POST /api/v1/sensors/{id}/actions` `{action: "decommission", reason}` | Sensor |

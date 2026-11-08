@@ -17,6 +17,29 @@ export function label(t: number): string {
   return `day ${day} ${iso(t).slice(11, 16)}`;
 }
 
+/**
+ * On a cold start the API may still be starting or migrating. Retry GET /healthz with backoff
+ * (connection refused or 5xx) for about a minute before giving up.
+ */
+export async function waitForApi(timeoutMs = 60 * SECOND): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let delay = 250;
+  for (;;) {
+    let why: string;
+    try {
+      const res = await fetch(`${BASE_URL}/healthz`);
+      if (res.ok) return;
+      why = `status ${res.status}`;
+    } catch (err) {
+      why = err instanceof Error ? (err.cause as { code?: string } | undefined)?.code ?? err.message : String(err);
+    }
+    if (Date.now() + delay > deadline) throw new Error(`the API at ${BASE_URL} is not up after ${timeoutMs / SECOND}s (${why})`);
+    console.log(`waiting for the API at ${BASE_URL} (${why}); retrying in ${delay} ms`);
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    delay = Math.min(delay * 2, 4 * SECOND);
+  }
+}
+
 export interface Reply {
   status: number;
   body: any;
@@ -117,7 +140,7 @@ export class Client {
   }
 
   async timeline(kind: 'gateways' | 'sensors', id: string): Promise<any[]> {
-    return (await this.ok('GET', `/api/v1/${kind}/${id}/timeline`)).entries;
+    return this.ok('GET', `/api/v1/${kind}/${id}/timeline`);
   }
 
   // --- narrating what the server now says ---------------------------------------

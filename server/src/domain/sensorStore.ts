@@ -255,8 +255,10 @@ async function loadReplayInput(tx: Tx, sensor: Sensor, now: number): Promise<Rep
 
   const batchIds = [...new Set([...outcomes.flatMap((o) => (o.batchId ? [o.batchId] : [])), ...readings.map((r) => r.batchId)])];
   const batches: ReplayInput['batches'] = {};
-  const batchRows = await tx.query('SELECT id, status, gateway_id FROM batches WHERE id = ANY($1)', [batchIds]);
-  for (const r of batchRows.rows) batches[r.id] = { status: r.status as BatchStatus, gatewayId: r.gateway_id };
+  const batchRows = await tx.query('SELECT id, status, gateway_id, received_at FROM batches WHERE id = ANY($1)', [batchIds]);
+  for (const r of batchRows.rows) {
+    batches[r.id] = { status: r.status as BatchStatus, gatewayId: r.gateway_id, receivedAt: r.received_at.getTime() };
+  }
 
   return {
     sensor: { id: sensor.id, type: sensor.type, registeredAt: sensor.registeredAt },

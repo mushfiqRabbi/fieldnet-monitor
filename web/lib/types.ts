@@ -97,9 +97,8 @@ export interface ListResponse<T> {
   items: T[];
 }
 
-export interface TimelineResponse {
-  entries: TimelineEntry[];
-}
+/** The timeline endpoints return a bare list, oldest first. */
+export type TimelineResponse = TimelineEntry[];
 
 export interface Summary {
   server_now: string;

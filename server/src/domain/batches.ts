@@ -141,6 +141,22 @@ async function finishBatch(
     [batch.id, status, attempts, iso(ctx.now), acceptedCount, reason],
   );
   await appendBatchEntry(ctx, batch, status, reason ?? 'processed');
+  await markResolvedBatchSensors(ctx, batch);
+}
+
+/**
+ * The batch is resolved (processed, partially_processed or quarantined), so every readings
+ * outcome that points to it is too. Recompute its sensor and every sensor whose cycle results
+ * name it: a quarantined batch turns those outcomes into could_not_read (brief: Sensor days).
+ */
+async function markResolvedBatchSensors(ctx: Ctx, batch: BatchRow): Promise<void> {
+  const { rows } = await ctx.tx.query(
+    `SELECT id FROM sensors
+      WHERE id = $1 OR id IN (SELECT sensor_id FROM cycle_results WHERE batch_id = $2)`,
+    [batch.sensorId, batch.id],
+  );
+  if (ctx.evidenceIds.length === 0) ctx.evidenceIds = [batch.id];
+  markDirty(ctx, rows.map((r) => r.id as string));
 }
 
 async function appendBatchEntry(ctx: Ctx, batch: BatchRow, to: BatchStatus, rule: string): Promise<void> {

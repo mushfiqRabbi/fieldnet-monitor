@@ -43,7 +43,7 @@ operatorApi.get('/gateways/:id', asyncHandler(async (req, res) => {
 
 operatorApi.get('/gateways/:id/timeline', asyncHandler(async (req, res) => {
   await requireGateway(pool, param(req, 'id'));
-  res.json({ entries: await readTimeline(pool, 'gateway', param(req, 'id')) });
+  res.json(await readTimeline(pool, 'gateway', param(req, 'id'))); // brief: a bare list of entries
 }));
 
 const gatewayActionSchema = z.object({
@@ -84,7 +84,7 @@ operatorApi.get('/sensors/:id', asyncHandler(async (req, res) => {
 
 operatorApi.get('/sensors/:id/timeline', asyncHandler(async (req, res) => {
   await requireSensor(pool, param(req, 'id'));
-  res.json({ entries: await readTimeline(pool, 'sensor', param(req, 'id')) });
+  res.json(await readTimeline(pool, 'sensor', param(req, 'id')));
 }));
 
 const coverageSchema = z.object({ gateway_ids: z.array(z.string().min(1)) });

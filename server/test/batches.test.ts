@@ -198,3 +198,40 @@ describe('processing failures', () => {
     expect((await batch('b2')).processing).toBe('processed');
   });
 });
+
+describe('a resolved batch recomputes the sensors whose outcomes point to it', () => {
+  // A readings outcome shows readings while its batch is unresolved; a quarantined batch
+  // turns it into could_not_read at once, not at the next midnight.
+  async function readingsOutcome(batchId: string) {
+    const token = await setup();
+    await cycle(token, 'c1', T0, [{ sensor_id: 's-1', outcome: 'readings', batch_id: batchId }]).expect(202);
+    expect(await sensor()).toMatchObject({ collection: 'readings' });
+    return token;
+  }
+
+  it('every reading invalid', async () => {
+    const token = await readingsOutcome('b1');
+    await putBatch(token, 'b1', 's-1', [reading('r1', T0, 'x')]).expect(202);
+    await drain();
+    expect(await sensor()).toMatchObject({ collection: 'could_not_read', lifecycle: 'pending' });
+  });
+
+  it('unknown sensor: the sensor named by the cycle is recomputed', async () => {
+    const token = await readingsOutcome('b1');
+    await putBatch(token, 'b1', 'ghost', [reading('r1', T0)]).expect(202);
+    await drain();
+    expect((await batch('b1')).processing).toBe('quarantined');
+    expect(await sensor()).toMatchObject({ collection: 'could_not_read' });
+  });
+
+  it('processing_failed after the 5th attempt', async () => {
+    const token = await readingsOutcome('b1');
+    await api().post('/test/faults').send({ processing_failures: 5 }).expect(200);
+    await putBatch(token, 'b1', 's-1', [reading('r1', T0)]).expect(202);
+    await setClock(T0 + 7 * MIN);
+    expect(await sensor()).toMatchObject({ collection: 'readings' }); // retrying: still unresolved
+    await setClock(T0 + 20 * MIN);
+    expect((await batch('b1')).processing).toBe('quarantined');
+    expect(await sensor()).toMatchObject({ collection: 'could_not_read' });
+  });
+});

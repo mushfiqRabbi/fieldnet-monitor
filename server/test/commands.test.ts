@@ -210,4 +210,47 @@ describe('collecting_after_stop', () => {
     await ack(token, cmd.command_id, T0 + MIN).expect(204);
     expect((await gateway()).flags).toEqual(['collecting_after_stop']);
   });
+
+  it('a superseded stop ack still opens a stop period; the superseding resume ack closes it', async () => {
+    // S1 issued, R1 issued before S1 is acked, then S1 acked: state stays resume_pending.
+    const token = await connectedGateway();
+    await gatewayAction('gw-1', 'stop').expect(200);
+    const [s1] = await commands(token);
+    await gatewayAction('gw-1', 'resume').expect(200);
+    const [r1] = await commands(token);
+    await ack(token, s1.command_id, T0 + MIN).expect(204);
+    expect(await gateway()).toMatchObject({ command_state: 'resume_pending', flags: [] });
+
+    // a reading between S1.acked_at and R1.acked_at is kept and raises the flag
+    await putBatch(token, 'inside', 's-1', [reading('r-in', T0 + 2 * MIN)]).expect(202);
+    await drain();
+    expect((await gateway()).flags).toEqual(['collecting_after_stop']);
+    const flag = (await timeline('gateways', 'gw-1')).find((e) => e.kind === 'flag');
+    expect(flag).toMatchObject({ rule: 'collecting_after_stop', evidence_ids: ['r-in'] });
+    await setClock(T0 + 3 * MIN);
+    expect((await sensor()).lifecycle).toBe('active'); // kept and counted
+
+    await ack(token, r1.command_id, T0 + 3 * MIN).expect(204);
+    expect(await gateway()).toMatchObject({ command_state: 'running', flags: [] });
+
+    // after the resume's acked_at: never raises it
+    await putBatch(token, 'after', 's-1', [reading('r-after', T0 + 4 * MIN)]).expect(202);
+    await drain();
+    expect((await gateway()).flags).toEqual([]);
+  });
+
+  it('a late superseded stop ack whose period already closed records readings but shows no flag', async () => {
+    const token = await connectedGateway();
+    await gatewayAction('gw-1', 'stop').expect(200);
+    const [s1] = await commands(token);
+    await gatewayAction('gw-1', 'resume').expect(200);
+    const [r1] = await commands(token);
+    await putBatch(token, 'b', 's-1', [reading('r1', T0 + 2 * MIN)]).expect(202);
+    await drain();
+    await ack(token, r1.command_id, T0 + 3 * MIN).expect(204);
+    await ack(token, s1.command_id, T0 + MIN).expect(204); // arrives last
+    expect(await gateway()).toMatchObject({ command_state: 'running', flags: [] });
+    const flag = (await timeline('gateways', 'gw-1')).find((e) => e.kind === 'flag');
+    expect(flag).toMatchObject({ evidence_ids: ['r1'] });
+  });
 });

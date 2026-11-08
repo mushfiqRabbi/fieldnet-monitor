@@ -37,7 +37,10 @@ export type DayClass = 'reading' | 'unresolved' | 'quiet' | 'unchecked';
 export interface Ctx {
   input: ReplayInput;
   now: number;
+  /** As recorded (server time of each PUT). Collection and the coverage axis use these. */
   assignments: ReplayInput['assignments'];
+  /** What the lifecycle replay uses: the first non-empty assignment counts from the epoch. */
+  replayAssignments: ReplayInput['assignments'];
   logs: ReplayInput['gatewayLogs'];
   readings: ReplayInput['readings'];
   outcomes: ResolvedOutcome[];
@@ -47,7 +50,10 @@ export interface Ctx {
   quietDays: Set<number>;
   /** Sorted finished_at of no_readings outcomes from a gateway that was available at that time. */
   checkTimes: number[];
+  /** Coverage changes the lifecycle replay sees (from `replayAssignments`). */
   coverageChanges: { at: number; coverage: SensorCoverage }[];
+  /** Coverage changes as recorded (from `assignments`); `coverageSince` comes from these. */
+  recordedCoverageChanges: { at: number; coverage: SensorCoverage }[];
 }
 
 const byTime = <T extends { effectiveAt: number }>(a: T, b: T) => a.effectiveAt - b.effectiveAt;
@@ -55,10 +61,12 @@ const byTime = <T extends { effectiveAt: number }>(a: T, b: T) => a.effectiveAt 
 export function buildContext(input: ReplayInput): Ctx {
   const logs: Ctx['logs'] = {};
   for (const [g, rows] of Object.entries(input.gatewayLogs)) logs[g] = [...rows].sort(byTime);
+  const assignments = [...input.assignments].sort(byTime);
   const ctx: Ctx = {
     input,
     now: input.now,
-    assignments: [...input.assignments].sort(byTime),
+    assignments,
+    replayAssignments: fromEpoch(assignments),
     logs,
     readings: [...input.readings].sort(
       (a, b) => a.takenAt - b.takenAt || (a.readingId < b.readingId ? -1 : a.readingId > b.readingId ? 1 : 0),
@@ -70,6 +78,7 @@ export function buildContext(input: ReplayInput): Ctx {
     quietDays: new Set(),
     checkTimes: [],
     coverageChanges: [],
+    recordedCoverageChanges: [],
   };
   ctx.outcomes = resolveOutcomes(ctx);
   ctx.collectionEvidence = buildCollectionEvidence(ctx);
@@ -82,7 +91,8 @@ export function buildContext(input: ReplayInput): Ctx {
     }
   }
   ctx.checkTimes.sort((a, b) => a - b);
-  ctx.coverageChanges = buildCoverageChanges(ctx);
+  ctx.coverageChanges = buildCoverageChanges(ctx, ctx.replayAssignments);
+  ctx.recordedCoverageChanges = buildCoverageChanges(ctx, ctx.assignments);
   return ctx;
 }
 
@@ -102,9 +112,9 @@ export function gatewayClassAt(ctx: Ctx, g: string, t: number): GatewayCoverageC
   return cls;
 }
 
-export function assignedAt(ctx: Ctx, t: number): string[] {
+export function assignedAt(ctx: Ctx, t: number, assignments = ctx.assignments): string[] {
   let ids: string[] = [];
-  for (const a of ctx.assignments) {
+  for (const a of assignments) {
     if (a.effectiveAt <= t) ids = a.gatewayIds;
     else break;
   }
@@ -112,10 +122,22 @@ export function assignedAt(ctx: Ctx, t: number): string[] {
 }
 
 /** Brief, "Coverage": the best class among the covering gateways; none if all dead or unassigned. */
-export function coverageAt(ctx: Ctx, t: number): SensorCoverage {
-  const classes = assignedAt(ctx, t).map((g) => gatewayClassAt(ctx, g, t));
+export function coverageAt(ctx: Ctx, t: number, assignments = ctx.assignments): SensorCoverage {
+  const classes = assignedAt(ctx, t, assignments).map((g) => gatewayClassAt(ctx, g, t));
   for (const c of COVERAGE_ORDER) if (classes.includes(c)) return c as SensorCoverage;
   return 'none';
+}
+
+/**
+ * Devices report a little after the fact, so evidence is often dated before the PUT that
+ * assigned the sensor. For the replay, the first non-empty assignment counts from the epoch
+ * (as a gateway's first log row does), and empty rows before it carry nothing. Every later
+ * change keeps its server time.
+ */
+function fromEpoch(assignments: ReplayInput['assignments']): ReplayInput['assignments'] {
+  const first = assignments.findIndex((a) => a.gatewayIds.length > 0);
+  if (first < 0) return assignments;
+  return [{ ...assignments[first], effectiveAt: Math.min(0, assignments[first].effectiveAt) }, ...assignments.slice(first + 1)];
 }
 
 /** Gateways that appear in any assignment: only these can affect this sensor. */
@@ -123,13 +145,13 @@ function relevantGateways(ctx: Ctx): string[] {
   return [...new Set(ctx.assignments.flatMap((a) => a.gatewayIds))];
 }
 
-function buildCoverageChanges(ctx: Ctx): Ctx['coverageChanges'] {
-  const times = new Set<number>(ctx.assignments.map((a) => a.effectiveAt));
+function buildCoverageChanges(ctx: Ctx, assignments: ReplayInput['assignments']): Ctx['coverageChanges'] {
+  const times = new Set<number>(assignments.map((a) => a.effectiveAt));
   for (const g of relevantGateways(ctx)) for (const row of ctx.logs[g] ?? []) times.add(row.effectiveAt);
   const changes: Ctx['coverageChanges'] = [];
   let prev: SensorCoverage = 'none';
   for (const at of [...times].sort((a, b) => a - b)) {
-    const coverage = coverageAt(ctx, at);
+    const coverage = coverageAt(ctx, at, assignments);
     if (coverage !== prev) changes.push({ at, coverage });
     prev = coverage;
   }
@@ -144,21 +166,27 @@ function buildCoverageChanges(ctx: Ctx): Ctx['coverageChanges'] {
  * Brief, "Sensor days": a readings outcome resolves when its batch ends processed,
  * partially_processed or quarantined, or when the batch deadline passes after finished_at
  * without the batch arriving. A quarantined or missing batch turns it into could_not_read.
+ * A batch that arrived in time but is still received/retrying keeps the outcome unresolved,
+ * even past the deadline (it did arrive). One that arrived after the deadline did not: the
+ * outcome resolved as could_not_read at the deadline and stays so until the batch ends.
  */
 function resolveOutcomes(ctx: Ctx): ResolvedOutcome[] {
   const { input, now } = ctx;
   return input.outcomes.map((o) => {
     const base = { gatewayId: o.gatewayId, finishedAt: o.finishedAt, deadlineAt: null as number | null };
     if (o.outcome !== 'readings') return { ...base, value: o.outcome, unresolved: false };
-    const batch = o.batchId === null ? undefined : input.batches[o.batchId];
+    const found = o.batchId === null ? undefined : input.batches[o.batchId];
+    const batch = found && found.receivedAt <= now ? found : undefined;
+    const deadlineAt = o.finishedAt + settingsAt(input.config, o.finishedAt).batchDeadlineMs;
     if (batch) {
       if (batch.status === 'processed' || batch.status === 'partially_processed') {
         return { ...base, value: 'readings', unresolved: false };
       }
       if (batch.status === 'quarantined') return { ...base, value: 'could_not_read', unresolved: false };
-      return { ...base, value: 'readings', unresolved: true }; // received / retrying
+      // received / retrying
+      if (batch.receivedAt >= deadlineAt) return { ...base, value: 'could_not_read', unresolved: false };
+      return { ...base, value: 'readings', unresolved: true };
     }
-    const deadlineAt = o.finishedAt + settingsAt(input.config, o.finishedAt).batchDeadlineMs;
     if (now >= deadlineAt) return { ...base, value: 'could_not_read', unresolved: false };
     return { ...base, value: 'readings', unresolved: true, deadlineAt };
   });
@@ -175,6 +203,11 @@ export function classifyDay(ctx: Ctx, day: number): DayClass {
   if (ctx.unresolvedDays.has(day)) return 'unresolved';
   if (ctx.quietDays.has(day)) return 'quiet';
   return 'unchecked';
+}
+
+/** Is there an unresolved readings outcome with finished_at in [start, end)? */
+export function hasUnresolvedBetween(ctx: Ctx, start: number, end: number): boolean {
+  return ctx.outcomes.some((o) => o.unresolved && o.finishedAt >= start && o.finishedAt < end);
 }
 
 /** Is there a proving no_readings outcome with finished_at in [start, end)? */
