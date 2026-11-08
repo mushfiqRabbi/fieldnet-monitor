@@ -39,16 +39,18 @@ export function Held({ since, now }: { since: string | null; now: string }) {
 /** A plain dash: "not applicable". Distinct from the hatched "unknown" and "paused" styles. */
 export function NotApplicable({ hint }: { hint?: string }) {
   return (
-    <span className="text-slate-500" title={hint} aria-label={hint ? `Not applicable. ${hint}` : "Not applicable"}>
+    <span className="text-slate-500" title={hint}>
       <span aria-hidden="true">—</span>
+      <span className="sr-only">{hint ? `Not applicable. ${hint}` : "Not applicable"}</span>
     </span>
   );
 }
 
 /**
- * A sensor counter, or the "not applicable" dash where its lifecycle does not use it:
- * quiet days count only while active, sampling cycles only while dormant or sampling.
- * The API value is still an integer (0) in those lifecycles.
+ * A sensor counter. A value above 0 is always shown: a dormant sensor keeps the 14 quiet days
+ * that sent it there, and a retired one keeps its 2 sampling cycles. A 0 is shown as a number
+ * only where the lifecycle counts it (quiet days while active, sampling cycles while dormant or
+ * sampling); elsewhere 0 means "does not apply", so it is a dash. The API value stays an integer.
  */
 export function SensorCounter({
   sensor,
@@ -59,15 +61,14 @@ export function SensorCounter({
   counter: "quiet_checked_days" | "sampling_cycles_done";
   className?: string;
 }) {
-  const applies =
+  const value = sensor[counter];
+  const counts =
     counter === "quiet_checked_days"
       ? sensor.lifecycle === "active"
       : sensor.lifecycle === "dormant" || sensor.lifecycle === "sampling";
-  if (!applies) {
-    const what = counter === "quiet_checked_days" ? "Quiet days count only while active." : "Sampling cycles count only while dormant or sampling.";
-    return <NotApplicable hint={`${what} This sensor is ${sensor.lifecycle}.`} />;
-  }
-  return <span className={className}>{sensor[counter]}</span>;
+  if (value > 0 || counts) return <span className={className}>{value}</span>;
+  const what = counter === "quiet_checked_days" ? "Quiet days count only while active." : "Sampling cycles count only while dormant or sampling.";
+  return <NotApplicable hint={`${what} This sensor is ${sensor.lifecycle}.`} />;
 }
 
 /**
@@ -88,5 +89,5 @@ export function NextEvaluation({ sensor, now }: { sensor: Sensor; now: string })
       </Badge>
     );
   }
-  return <NotApplicable hint={`No timer: a ${sensor.lifecycle} sensor has no wait or window running.`} />;
+  return <NotApplicable hint={`No timer: this sensor is ${sensor.lifecycle}, so no wait or window is running.`} />;
 }
