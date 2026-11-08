@@ -1,0 +1,76 @@
+name: fieldnet
+
+x-server-env: &server-env
+  DATABASE_URL: postgres://fieldnet:fieldnet@db:5432/fieldnet
+  # Test endpoints are on by default so the fixed API can be tested as delivered.
+  # Run `TEST_MODE=0 docker compose up` for live mode (worker processes in the background).
+  TEST_MODE: ${TEST_MODE:-1}
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: fieldnet
+      POSTGRES_PASSWORD: fieldnet
+      POSTGRES_DB: fieldnet
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+      - ./docker/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fieldnet"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build: ./server
+    environment:
+      <<: *server-env
+      PORT: "8000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build: ./server
+    command: ["node", "dist/worker.js"]
+    environment: *server-env
+    depends_on:
+      api:
+        condition: service_started
+
+  web:
+    build: ./web
+    environment:
+      API_URL: http://api:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+  # docker compose run --rm test
+  test:
+    build: ./server
+    profiles: ["tools"]
+    command: ["npm", "test"]
+    environment:
+      DATABASE_URL: postgres://fieldnet:fieldnet@db:5432/fieldnet_test
+      TEST_MODE: "1"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # docker compose run --rm sim   (needs the api running in test mode; resets its data)
+  sim:
+    build: ./server
+    profiles: ["tools"]
+    command: ["npm", "run", "sim"]
+    environment:
+      API_URL: http://api:8000
+    depends_on:
+      - api
+
+volumes:
+  dbdata:
